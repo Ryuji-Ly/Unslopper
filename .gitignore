@@ -1,0 +1,21 @@
+# dependencies
+node_modules/
+
+# generated chapters — large, regeneratable, not source
+output/
+
+# env/secrets, in case this ever moves to a .env file instead of ~/.bashrc
+.env
+.env.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/
+.idea/
+
+# logs
+*.log
+npm-debug.log*
