@@ -24,6 +24,7 @@ const fs = require('fs');
 const path = require('path');
 const cheerio = require('cheerio');
 const { sleep, fetchWithRetry } = require('./lib/http');
+const { addChapterToIndex } = require('./lib/outputIndex');
 const { findParser } = require('./parsers');
 const { rewriteChapter } = require('./rewrite');
 
@@ -60,12 +61,16 @@ async function fetchChapterPage(url) {
   }
 }
 
-async function processChapter(url, parser, outputDir) {
+async function processChapter(url, parser, novelSlug, outputDir) {
   const chapterSlug = parser.getChapterSlug(url);
   const outPath = path.join(outputDir, `chapter-${chapterSlug}.md`);
 
   if (fs.existsSync(outPath)) {
     console.log(`skip chapter-${chapterSlug} (already done)`);
+    // Backfill the index in case this chapter was saved before index.json
+    // existed (or the index got out of sync some other way) — cheap and
+    // idempotent, so it's safe to do on every skip.
+    addChapterToIndex(OUTPUT_BASE_DIR, parser.id, novelSlug, chapterSlug);
     // still need to know the next URL to keep the crawl going
     const $ = await fetchChapterPage(url);
     return parser.extractChapter($, url).nextUrl;
@@ -84,6 +89,7 @@ async function processChapter(url, parser, outputDir) {
 
   const fileContent = `# ${title}\n\n${rewritten}\n`;
   fs.writeFileSync(outPath, fileContent, 'utf8');
+  addChapterToIndex(OUTPUT_BASE_DIR, parser.id, novelSlug, chapterSlug);
   console.log(`  saved -> ${outPath}`);
 
   return nextUrl;
@@ -110,7 +116,7 @@ async function main() {
 
   while (url && count < MAX_CHAPTERS) {
     try {
-      url = await processChapter(url, parser, outputDir);
+      url = await processChapter(url, parser, novelSlug, outputDir);
       consecutiveChapterFailures = 0;
     } catch (err) {
       // A 404 on the chapter page itself (not the LLM call) means the site

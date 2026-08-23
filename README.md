@@ -36,6 +36,9 @@ site, then register it in `parsers/index.js`.
 batch-rewrite.js   orchestrator: crawl, parse, rewrite, save
 rewrite.js          Gemini de-slopping logic
 lib/http.js         shared fetch-with-retry
+lib/outputIndex.js  maintains output/index.json (a lookup table of what's done)
 parsers/            one file per site
-output/             generated chapters (gitignored)
+output/             generated chapters + index.json (gitignored)
+extension/          browser extension that reads output/ to swap already-
+                    rewritten chapters in-page — see extension/README.md
 ```

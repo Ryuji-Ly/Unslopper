@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Novel De-slopper",
+  "version": "0.1.1",
+  "description": "Swaps AI-slop novel chapters for your locally pre-rewritten versions.",
+  "permissions": ["storage"],
+  "host_permissions": ["file:///*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://novelphoenix.com/*"],
+      "js": ["parsers/novelphoenix.js", "parsers/index.js", "content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  }
+}
