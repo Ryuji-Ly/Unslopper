@@ -23,6 +23,21 @@ Saves to `output/<site-id>/<novel-slug>/chapter-<n>.md`. Safe to stop
 (Ctrl+C) and re-run anytime — skips chapters already done, and stops
 cleanly once it hits a chapter that doesn't exist yet.
 
+## Checking quality
+
+`lib/slopScan.js` counts AI-prose patterns (negative parallelism, triplets,
+staccato fragments, dashes, AI vocabulary...), based on Wikipedia's
+[Signs of AI writing](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing).
+Each run logs a `slop score: before -> after pass 1 -> after pass 2` line,
+and you can score saved chapters directly (`-v` lists flagged sentences):
+
+```bash
+node lib/slopScan.js -v output/novelphoenix.com/the-guardian-gods/chapter-505.md
+```
+
+It's a crude regex pointer, not a judge; use it to compare prompt changes,
+then read the output.
+
 ## Adding a site
 
 No parser for a URL's site → the script exits and says so. To add one,
@@ -37,6 +52,7 @@ batch-rewrite.js   orchestrator: crawl, parse, rewrite, save
 rewrite.js          Gemini de-slopping logic
 lib/http.js         shared fetch-with-retry
 lib/outputIndex.js  maintains output/index.json (a lookup table of what's done)
+lib/slopScan.js     AI-prose pattern scanner (feeds pass 2, scores output)
 parsers/            one file per site
 output/             generated chapters + index.json (gitignored)
 extension/          browser extension that reads output/ to swap already-
