@@ -11,8 +11,9 @@
  */
 
 const novelphoenix = require('./novelphoenix');
+const novelping = require('./novelping');
 
-const PARSERS = [novelphoenix];
+const PARSERS = [novelphoenix, novelping];
 
 function findParser(url) {
   return PARSERS.find((p) => p.matches(url)) || null;

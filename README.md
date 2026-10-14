@@ -17,7 +17,13 @@ Get a free key at <https://aistudio.google.com> → "Get API key".
 
 ```bash
 node batch-rewrite.js <start-chapter-url>
+node batch-rewrite.js <book-url> [chapter-number]   # sites with a chapter list
 ```
+
+Supported sites: novelphoenix.com, novelping.com. On novelping, chapter
+URLs include the chapter title, so the book-URL form is easier, e.g.
+`node batch-rewrite.js https://novelping.com/book/<novel> 1` (defaults to
+the first chapter if no number is given).
 
 Saves to `output/<site-id>/<novel-slug>/chapter-<n>.md`. Safe to stop
 (Ctrl+C) and re-run anytime — skips chapters already done, and stops
@@ -43,7 +49,11 @@ then read the output.
 No parser for a URL's site → the script exits and says so. To add one,
 copy `parsers/novelphoenix.js` to `parsers/your-site.js`, adjust the
 selectors in `extractChapter()` and the slug functions to match that
-site, then register it in `parsers/index.js`.
+site, then register it in `parsers/index.js`. If the site's chapter URLs can't be
+guessed, also add `isIndexUrl`, `getChapterList` (and `getChapterListUrl`
+if the list is loaded separately), like `parsers/novelping.js` does. For the
+extension, add a matching file in `extension/parsers/` and a
+`content_scripts` entry in `extension/manifest.json`.
 
 ## Layout
 

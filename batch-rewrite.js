@@ -13,6 +13,10 @@
  *
  * Usage:
  *   node batch-rewrite.js <start-chapter-url>
+ *   node batch-rewrite.js <book-url> [chapter-number]
+ * The second form only works on sites whose parser can read the book's
+ * chapter list (getChapterList), e.g. novelping.com. It starts at the given
+ * chapter number, or the first chapter if none is given.
  *
  * Re-running is safe: it skips any chapter that already has an output file,
  * so you can stop (Ctrl+C) and resume anytime, including on a different
@@ -30,6 +34,7 @@ const { rewriteChapter } = require('./rewrite');
 
 // ---------------------- CONFIG ----------------------
 const START_URL = process.argv[2];
+const START_CHAPTER = process.argv[3]; // only used with a book URL
 const MAX_CHAPTERS = 500;              // safety cap, stops even if "next" links loop
 const OUTPUT_BASE_DIR = './output';
 const DELAY_BETWEEN_PAGES_MS = 1500;   // be polite to the site
@@ -40,6 +45,7 @@ const PAGE_RETRIES = 6;
 if (!START_URL) {
   console.error('No start URL given.');
   console.error('Usage: node batch-rewrite.js <start-chapter-url>');
+  console.error('       node batch-rewrite.js <book-url> [chapter-number]');
   process.exit(1);
 }
 
@@ -95,6 +101,32 @@ async function processChapter(url, parser, novelSlug, outputDir) {
   return nextUrl;
 }
 
+// A chapter URL is used as-is. A book URL is looked up in the book's
+// chapter list, for sites where chapter URLs can't be guessed.
+async function resolveStartUrl(parser) {
+  if (!parser.isIndexUrl?.(START_URL)) return START_URL;
+
+  if (!parser.getChapterList) {
+    console.error(`${parser.id} has no chapter-list support; pass a chapter URL instead.`);
+    process.exit(1);
+  }
+  const listUrl = parser.getChapterListUrl?.(START_URL) || START_URL;
+  const chapters = parser.getChapterList(await fetchChapterPage(listUrl), START_URL);
+  if (chapters.length === 0) {
+    console.error(`No chapters found on ${START_URL} — the site's markup may have changed.`);
+    process.exit(1);
+  }
+
+  const start = START_CHAPTER ? chapters.find((c) => c.number === START_CHAPTER) : chapters[0];
+  if (!start) {
+    console.error(`Chapter ${START_CHAPTER} isn't in the chapter list (${chapters.length} chapters, ` +
+      `${chapters[0].number}-${chapters[chapters.length - 1].number}).`);
+    process.exit(1);
+  }
+  console.log(`Starting at ${start.title || `chapter ${start.number}`}`);
+  return start.url;
+}
+
 async function main() {
   const parser = findParser(START_URL);
   if (!parser) {
@@ -110,7 +142,7 @@ async function main() {
   console.log(`Site: ${parser.id}  |  Novel: ${novelSlug}`);
   console.log(`Output: ${outputDir}\n`);
 
-  let url = START_URL;
+  let url = await resolveStartUrl(parser);
   let count = 0;
   let consecutiveChapterFailures = 0;
 

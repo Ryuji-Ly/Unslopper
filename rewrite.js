@@ -113,6 +113,14 @@ RULES:
 - Every paragraph of the chapter starts with a marker like [12]. Output every marker exactly once, in the same order, each followed by its paragraph, with one blank line between paragraphs. Never drop a marker or move text from one marker to another.
 - Output only the full marked chapter text. No preamble, no list of changes, no Markdown.`;
 
+const BLOCK_FINISH_REASONS = new Set(['SAFETY', 'PROHIBITED_CONTENT', 'BLOCKLIST', 'SPII', 'RECITATION']);
+
+// When text is blocked it's split in half and each half retried, down to
+// this many paragraphs, so only the paragraph(s) that trip the filter stay
+// unrewritten. Finding one bad paragraph in a 100-paragraph chapter costs
+// about 2 extra requests per halving (~14 total).
+const BLOCKED_MIN_PARAGRAPHS = 1;
+
 let lastCallAt = 0;
 async function throttleLLMCalls() {
   const wait = lastCallAt + MIN_MS_BETWEEN_LLM_CALLS - Date.now();
@@ -162,6 +170,18 @@ async function callGemini(text, systemPrompt, prompt = text) {
   const candidate = data.candidates?.[0];
   const output = cleanOutput(candidate?.content?.parts?.map((p) => p.text).join('') || '');
 
+  // Content filters: PROHIBITED_CONTENT can't be configured away and fires
+  // on things like "assault" + "young girl" in the same passage even when
+  // nothing explicit happens. Retrying the same text never helps, so this is
+  // flagged for rewriteChapter to work around instead of cooling down.
+  const blockReason = data.promptFeedback?.blockReason ||
+    (BLOCK_FINISH_REASONS.has(candidate?.finishReason) ? candidate.finishReason : null);
+  if (blockReason) {
+    const err = new Error(`Gemini refused this text (${blockReason})`);
+    err.blocked = true;
+    throw err;
+  }
+
   if (!output) {
     const reason = candidate?.finishReason || 'unknown';
     throw new Error(`Empty response from Gemini (finishReason: ${reason})`);
@@ -200,7 +220,8 @@ const toNumbered = (paragraphs) => paragraphs.map((p, i) => `[${i + 1}] ${p}`).j
 
 /**
  * Parses "[n] text" output back into paragraphs. Any marker the model
- * dropped is filled from `fallback` (the previous stage's paragraph).
+ * dropped is filled from `fallback` (the previous stage's paragraph) and
+ * reported in `missing` (0-based indexes) so the caller can retry them.
  */
 function fromNumbered(output, fallback) {
   const byIndex = new Map();
@@ -214,16 +235,70 @@ function fromNumbered(output, fallback) {
     if (text) byIndex.set(idx, byIndex.has(idx) ? `${byIndex.get(idx)} ${text}` : text);
   });
 
-  const restored = [];
+  const missing = [];
   const paragraphs = fallback.map((orig, i) => {
     if (byIndex.has(i + 1)) return byIndex.get(i + 1);
-    restored.push(i + 1);
+    missing.push(i);
     return orig;
   });
-  if (restored.length) {
-    console.warn(`  ⚠ model dropped paragraph(s) ${restored.join(', ')}; kept the previous version of those`);
+  return { paragraphs, missing };
+}
+
+const formatParagraphRanges = (indexes) => indexes.map((i) => i + 1).join(', ');
+
+/**
+ * Pass 1 over a list of paragraphs. Flash-Lite sometimes stops early on long
+ * chapters and skips the last 5-15 paragraphs, so anything it skipped is sent
+ * again on its own once. Throws err.blocked if the content filter refuses.
+ */
+async function firstPassWithRepair(paragraphs) {
+  const result = fromNumbered(await callGemini(toNumbered(paragraphs), SYSTEM_PROMPT_PASS1), paragraphs);
+  if (result.missing.length === 0) return result.paragraphs;
+
+  console.log(`  re-requesting ${result.missing.length} paragraph(s) the model skipped ...`);
+  const retryInput = result.missing.map((i) => paragraphs[i]);
+  let retry;
+  try {
+    retry = fromNumbered(await callGemini(toNumbered(retryInput), SYSTEM_PROMPT_PASS1), retryInput);
+  } catch (err) {
+    if (!err.blocked) throw err;
+    retry = { paragraphs: retryInput, missing: retryInput.map((_, k) => k) };
   }
-  return paragraphs;
+  result.missing.forEach((i, k) => { result.paragraphs[i] = retry.paragraphs[k]; });
+
+  const stillMissing = retry.missing.map((k) => result.missing[k]);
+  if (stillMissing.length) {
+    console.warn(`  ⚠ paragraph(s) ${formatParagraphRanges(stillMissing)} left unrewritten (model skipped them twice)`);
+  }
+  return result.paragraphs;
+}
+
+/**
+ * Pass 1 that survives the content filter: if a block of paragraphs is
+ * refused, split it in half and retry each half, recursively, so only the
+ * paragraphs that actually trip the filter are left as-is.
+ * `offset` is only for log messages (1-based paragraph numbers).
+ * Returns { paragraphs, anyBlocked }.
+ */
+async function firstPassSplitting(paragraphs, offset = 0) {
+  const range = paragraphs.length === 1 ? `${offset + 1}` : `${offset + 1}-${offset + paragraphs.length}`;
+  try {
+    return { paragraphs: await firstPassWithRepair(paragraphs), anyBlocked: false };
+  } catch (err) {
+    if (!err.blocked) throw err;
+    if (paragraphs.length <= BLOCKED_MIN_PARAGRAPHS) {
+      console.warn(`  ⚠ paragraph(s) ${range} left unrewritten (${err.message})`);
+      return { paragraphs, anyBlocked: true };
+    }
+    console.warn(`  ⚠ paragraphs ${range}: ${err.message}; splitting in half`);
+    const mid = Math.ceil(paragraphs.length / 2);
+    const left = await firstPassSplitting(paragraphs.slice(0, mid), offset);
+    const right = await firstPassSplitting(paragraphs.slice(mid), offset + mid);
+    return {
+      paragraphs: [...left.paragraphs, ...right.paragraphs],
+      anyBlocked: left.anyBlocked || right.anyBlocked,
+    };
+  }
 }
 
 /** Builds pass 2's user message: the flagged sentences, then the chapter. */
@@ -238,21 +313,35 @@ async function rewriteChapter(paragraphs) {
   const before = scanText(paragraphs.join('\n\n'));
 
   console.log(`  rewriting pass 1/2 (${paragraphs.length} paragraphs) ...`);
-  const numbered = toNumbered(paragraphs);
-  const firstPass = fromNumbered(await callGemini(numbered, SYSTEM_PROMPT_PASS1), paragraphs);
+  const { paragraphs: firstPass, anyBlocked } = await firstPassSplitting(paragraphs);
   const afterFirst = scanText(firstPass.join('\n\n'));
 
   // Pass 2 only targets what the scanner can point at, so if it finds
-  // nothing there's no point spending a free-tier request on it.
+  // nothing there's no point spending a free-tier request on it. A missing
+  // paragraph here just falls back to its pass 1 version, which is already
+  // rewritten, so it isn't retried.
   let rewritten = firstPass;
   let after = afterFirst;
   if (afterFirst.flagged.length === 0) {
     console.log('  pass 2/2 skipped (scanner found nothing left to fix)');
+  } else if (anyBlocked) {
+    // Pass 2 sends the whole chapter, including the chunk that was refused,
+    // so it would just be refused too.
+    console.log('  pass 2/2 skipped (part of this chapter is blocked by the content filter)');
   } else {
     console.log(`  rewriting pass 2/2 (${afterFirst.flagged.length} flagged sentences) ...`);
-    const pass2Prompt = buildPass2Prompt(firstPass, afterFirst.flagged);
-    rewritten = fromNumbered(await callGemini(toNumbered(firstPass), SYSTEM_PROMPT_PASS2, pass2Prompt), firstPass);
-    after = scanText(rewritten.join('\n\n'));
+    try {
+      const pass2Prompt = buildPass2Prompt(firstPass, afterFirst.flagged);
+      const result = fromNumbered(await callGemini(toNumbered(firstPass), SYSTEM_PROMPT_PASS2, pass2Prompt), firstPass);
+      if (result.missing.length) {
+        console.warn(`  ⚠ pass 2 skipped paragraph(s) ${formatParagraphRanges(result.missing)}; kept their pass 1 version`);
+      }
+      rewritten = result.paragraphs;
+      after = scanText(rewritten.join('\n\n'));
+    } catch (err) {
+      if (!err.blocked) throw err;
+      console.warn(`  ⚠ pass 2 ${err.message}; keeping pass 1 output`);
+    }
   }
 
   console.log(`  slop score: ${formatCounts(before)} -> ${afterFirst.total} -> ${formatCounts(after)}`);
